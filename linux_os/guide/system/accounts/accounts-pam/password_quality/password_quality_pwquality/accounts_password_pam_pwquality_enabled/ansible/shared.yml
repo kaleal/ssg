@@ -1,7 +1,12 @@
-# platform = multi_platform_sle
+# platform = multi_platform_sle,multi_platform_debian,multi_platform_ubuntu
 # reboot = false
 # strategy = configure
 # complexity = low
 # disruption = medium
 
+{{% if 'ubuntu' in product or 'debian' in product %}}
+{{{ ansible_pam_auth_update_profile('cac_pwquality', rule_title=rule_title) }}}
+{{{ ansible_apply_pam_auth_update_checked(['cac_pwquality'], ['cracklib', 'pwquality'], rule_title=rule_title) }}}
+{{% else %}}
 {{{ ansible_ensure_pam_module_configuration('/etc/pam.d/common-password', 'password', 'requisite', 'pam_pwquality.so', '', '', 'BOF', rule_id=rule_id, rule_title=rule_title) }}}
+{{% endif %}}

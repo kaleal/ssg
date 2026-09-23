@@ -1,0 +1,29 @@
+# platform = multi_platform_debian,multi_platform_ubuntu
+# reboot = false
+# strategy = configure
+# complexity = low
+# disruption = medium
+
+{{{ ansible_instantiate_variables('var_password_pam_remember') }}}
+{{{ ansible_pam_auth_update_profile('cac_pwhistory', rule_title=rule_title) }}}
+
+- name: '{{{ rule_title }}} - Set the history length in each password profile entry'
+  ansible.builtin.replace:
+    path: /usr/share/pam-configs/cac_pwhistory
+    regexp: '(?m)^([^#\n]*\bpam_pwhistory\.so\b[^#\n]*?)(?:[ \t]+remember=\S+|(?=[ \t]*(?:#.*)?$))'
+    replace: '\1 remember={{ var_password_pam_remember }}'
+
+- name: '{{{ rule_title }}} - Ensure use_authtok in the Password section'
+  ansible.builtin.replace:
+    path: /usr/share/pam-configs/cac_pwhistory
+    regexp: '(?m)^(Password:[^\n]*(?:\n[ \t]+[^\n]*)*?\bpam_pwhistory\.so\b)(?![^\n]*\buse_authtok\b)'
+    replace: '\1 use_authtok'
+
+{{{ ansible_apply_pam_auth_update_checked(['cac_pwhistory'], ['pwhistory'], rule_title=rule_title) }}}
+
+- name: '{{{ rule_title }}} - Verify the applied history options'
+  ansible.builtin.shell: |
+    grep -qP '^\s*password\s+requisite\s+pam_pwhistory\.so\s+.*\bremember={{ var_password_pam_remember | int }}(\s|$)' /etc/pam.d/common-password &&
+    grep -qP '^\s*password\s+requisite\s+pam_pwhistory\.so\s+.*\buse_authtok(\s|$)' /etc/pam.d/common-password
+  changed_when: false
+  when: not ansible_check_mode

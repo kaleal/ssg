@@ -1,0 +1,7 @@
+# platform = multi_platform_ubuntu,multi_platform_debian
+# reboot = false
+# strategy = configure
+# complexity = low
+# disruption = medium
+
+{{{ ansible_pam_faillock_enable(rule_title=rule_title) }}}

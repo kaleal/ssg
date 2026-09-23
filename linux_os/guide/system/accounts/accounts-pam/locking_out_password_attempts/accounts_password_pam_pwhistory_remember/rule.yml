@@ -50,6 +50,11 @@ platform: package[pam]
 {{% if 'ubuntu' not in product %}}
 template:
     name: pam_options
+    {{% if 'debian' in product %}}
+    backends:
+      bash: off
+      ansible: off
+    {{% endif %}}
     vars:
       path: /etc/pam.d/common-password
       type: password

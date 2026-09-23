@@ -821,12 +821,12 @@ authselect enable-feature {{{ feature }}}
 
 
 {{#
-    Enable pam_faillock.so PAM module by directly editing PAM files.
-    This option is only recommended when authselect tool is not available for the system.
+    Enable pam_faillock.so without authselect. Debian and Ubuntu use
+    pam-auth-update profiles; other distributions edit their PAM files directly.
 
 #}}
 {{%- macro bash_enable_pam_faillock_directly_in_pam_files() -%}}
-{{% if 'debian' in product or product in ['sle15', 'sle16'] %}}
+{{% if product in ['sle15', 'sle16'] %}}
 pam_file="/etc/pam.d/common-auth"
 if ! grep -qE '^\s*auth\s+required\s+pam_faillock\.so\s+preauth.*$' "$pam_file" ; then
     {{% if  product in ['sle15', 'sle16'] %}}
@@ -881,39 +881,10 @@ fi
     '')
 }}}
 {{% endif %}}
-{{% elif 'ubuntu' in product %}}
-conf_name=cac_faillock
-
-if [ ! -f /usr/share/pam-configs/"$conf_name" ]; then
-    cat << EOF > /usr/share/pam-configs/"$conf_name"
-Name: Enable pam_faillock to deny access
-Default: yes
-Conflicts: faillock
-Priority: 0
-Auth-Type: Primary
-Auth:
-    [default=die]                   pam_faillock.so authfail
-EOF
-    chmod 0644 /usr/share/pam-configs/"$conf_name"
-fi
-
-if [ ! -f /usr/share/pam-configs/"$conf_name"_notify ]; then
-    cat << EOF > /usr/share/pam-configs/"$conf_name"_notify
-Name: Notify of failed login attempts and reset count upon success
-Default: yes
-Conflicts: faillock_notify
-Priority: 1025
-Auth-Type: Primary
-Auth:
-    requisite                       pam_faillock.so preauth
-Account-Type: Primary
-Account:
-    required                        pam_faillock.so
-EOF
-    chmod 0644 /usr/share/pam-configs/"$conf_name"_notify
-fi
-
-DEBIAN_FRONTEND=noninteractive pam-auth-update
+{{% elif 'ubuntu' in product or 'debian' in product %}}
+{{{ bash_pam_auth_update_profile('cac_faillock') }}}
+{{{ bash_pam_auth_update_profile('cac_faillock_notify') }}}
+{{{ bash_apply_pam_auth_update(['cac_faillock', 'cac_faillock_notify'], ['faillock', 'faillock_notify']) }}}
 
 {{% else %}}
 AUTH_FILES=("/etc/pam.d/system-auth" "/etc/pam.d/password-auth")
@@ -931,11 +902,15 @@ done
 
 
 {{%- macro bash_pam_faillock_enable() -%}}
+{{% if 'ubuntu' in product or 'debian' in product %}}
+{{{ bash_enable_pam_faillock_directly_in_pam_files() }}}
+{{% else %}}
 if [ -f /usr/bin/authselect ]; then
     {{{ bash_enable_pam_faillock_with_authselect() }}}
 else
     {{{ bash_enable_pam_faillock_directly_in_pam_files() }}}
 fi
+{{% endif %}}
 {{%- endmacro -%}}
 
 
@@ -944,6 +919,10 @@ fi
     This option is only recommended when pam-auth-update tool is available for the system.
 #}}
 {{%- macro bash_pam_pwquality_enable() -%}}
+{{% if 'ubuntu' in product or 'debian' in product %}}
+{{{ bash_pam_auth_update_profile('cac_pwquality') }}}
+{{{ bash_apply_pam_auth_update(['cac_pwquality'], ['cracklib', 'pwquality']) }}}
+{{% else %}}
 conf_name=cac_pwquality
 if [ ! -f /usr/share/pam-configs/"$conf_name" ]; then
     cat << EOF > /usr/share/pam-configs/"$conf_name"
@@ -959,6 +938,7 @@ EOF
 fi
 
 DEBIAN_FRONTEND=noninteractive pam-auth-update
+{{% endif %}}
 {{%- endmacro -%}}
 
 
@@ -1089,9 +1069,17 @@ fi
                     Note: For this macro, there is a special value used to include a line at
                     the beginning of the file: "BOF"
 :type after_match: str
+:param apply: Apply the Debian/Ubuntu profile immediately, or defer until its options are set.
+:type apply: bool
 
 #}}
-{{%- macro bash_pam_pwhistory_enable(pam_file, control, after_match='') -%}}
+{{%- macro bash_pam_pwhistory_enable(pam_file, control, after_match='', apply=true) -%}}
+{{% if 'ubuntu' in product or 'debian' in product %}}
+{{{ bash_pam_auth_update_profile(pam_file) }}}
+{{% if apply %}}
+{{{ bash_apply_pam_auth_update([pam_file], ['pwhistory']) }}}
+{{% endif %}}
+{{% else %}}
 if [ -f /usr/bin/authselect ]; then
     if authselect list-features sssd | grep -q with-pwhistory; then
         {{{ bash_enable_authselect_feature('with-pwhistory') | indent(8) }}}
@@ -1101,27 +1089,9 @@ if [ -f /usr/bin/authselect ]; then
         {{{ bash_ensure_pam_module_line("$PAM_FILE_PATH", 'password', control, 'pam_pwhistory.so', after_match) | indent(8) }}}
     fi
 else
-{{% if 'ubuntu' in product or 'debian' in product %}}
-conf_name={{{ pam_file }}}
-conf_path="/usr/share/pam-configs"
-
-if [ ! -f "$conf_path"/"$conf_name" ]; then
-    cat << EOF > "$conf_path"/"$conf_name"
-Name: pwhistory password history checking
-Default: yes
-Priority: 1024
-Password-Type: Primary
-Password: {{{ control }}} pam_pwhistory.so remember=24 enforce_for_root try_first_pass use_authtok
-Password-Initial: {{{ control }}} pam_pwhistory.so remember=24 enforce_for_root try_first_pass
-EOF
-    chmod 0644 "$conf_path"/"$conf_name"
-fi
-
-DEBIAN_FRONTEND=noninteractive pam-auth-update
-{{% else %}}
     {{{ bash_ensure_pam_module_line(pam_file, 'password', control, 'pam_pwhistory.so', after_match) | indent(4) }}}
-{{% endif %}}
 fi
+{{% endif %}}
 {{%- endmacro -%}}
 
 
@@ -1187,6 +1157,27 @@ fi
 
 #}}
 {{%- macro bash_pam_faillock_parameter_value(option, value='', authfail=True) -%}}
+{{% if 'ubuntu' in product or 'debian' in product %}}
+FAILLOCK_CONF="{{{ pam_faillock_conf_path }}}"
+if [ ! -e "$FAILLOCK_CONF" ]; then
+    install -m 0644 /dev/null "$FAILLOCK_CONF" || exit 1
+fi
+{{% if value == '' %}}
+if ! grep -qE '^\s*{{{ option }}}\s*(#.*)?$' "$FAILLOCK_CONF"; then
+    printf '%s\n' '{{{ option }}}' >> "$FAILLOCK_CONF" || exit 1
+fi
+{{% else %}}
+if grep -qE '^\s*{{{ option }}}\s*=' "$FAILLOCK_CONF"; then
+    sed -i -E 's|^(\s*{{{ option }}}\s*=\s*).*|\1'"{{{ value }}}"'|' "$FAILLOCK_CONF" || exit 1
+else
+    printf '%s\n' "{{{ option }}} = {{{ value }}}" >> "$FAILLOCK_CONF" || exit 1
+fi
+{{% endif %}}
+for pam_profile in /usr/share/pam-configs/cac_faillock /usr/share/pam-configs/cac_faillock_notify; do
+    sed -i -E '/pam_faillock\.so/ s/[[:space:]]+{{{ option }}}(=[^[:space:]]+)?([[:space:]]|$)/\2/g' "$pam_profile" || exit 1
+done
+{{{ bash_apply_pam_auth_update(['cac_faillock', 'cac_faillock_notify'], ['faillock', 'faillock_notify']) }}}
+{{% else %}}
 {{% if 'ubuntu' in product or 'debian' in product or product in ['sle15', 'sle16'] %}}
 AUTH_FILES=("/etc/pam.d/common-auth")
 SKIP_FAILLOCK_CHECK=true
@@ -1245,6 +1236,7 @@ else
         {{%- endif %}}
     done
 fi
+{{% endif %}}
 {{%- endmacro -%}}
 
 

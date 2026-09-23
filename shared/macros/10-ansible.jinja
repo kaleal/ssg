@@ -1332,7 +1332,7 @@ The following macro remediates Audit syscall rule in :code:`/etc/audit/audit.rul
 
 #}}
 {{%- macro ansible_pam_faillock_enable(rule_title=None) -%}}
-{{% if 'ubuntu' not in product %}}
+{{% if 'ubuntu' not in product and 'debian' not in product %}}
 {{{ ansible_check_authselect_presence(rule_title=rule_title) }}}
 
 - name: {{{ rule_title }}} - Remediation where authselect tool is present
@@ -1464,61 +1464,10 @@ The following macro remediates Audit syscall rule in :code:`/etc/audit/audit.rul
     - not result_authselect_present.stat.exists
 {{% endif %}}
 {{% else %}}
-{{{ ansible_check_pam_auth_update_presence(rule_title=rule_title) }}}
-
-- name: {{{ rule_title }}} - Remediation where pam-auth-update tool is present
-  block:
-    - name: {{{ rule_title }}} - Check the presence of cac_faillock file
-      ansible.builtin.stat:
-        path: /usr/share/pam-configs/cac_faillock
-      register: faillock_file_stat
-
-    - name: {{{ rule_title }}} - Check the presence of cac_faillock_notify file
-      ansible.builtin.stat:
-        path: /usr/share/pam-configs/cac_faillock_notify
-      register: faillock_notify_file_stat
-
-    - name: {{{ rule_title }}} - Put the content into cac_faillock if it does not exist
-      ansible.builtin.copy:
-        dest: /usr/share/pam-configs/cac_faillock
-        content: |+
-          Name: Enable pam_faillock to deny access
-          Default: yes
-          Priority: 0
-          Conflicts: faillock
-          Auth-Type: Primary
-          Auth:
-            [default=die]                   pam_faillock.so authfail
-            sufficient                      pam_faillock.so authsucc
-        force: yes
-        mode: 0644
-      when: not faillock_file_stat.stat.exists
-
-    - name: {{{ rule_title }}} - Put the content into cac_faillock_notify if it does not exist
-      ansible.builtin.copy:
-        dest: /usr/share/pam-configs/cac_faillock_notify
-        content: |+
-          Name: Notify of failed login attempts and reset count upon success
-          Default: yes
-          Priority: 1025
-          Conflicts: faillock_notify
-          Auth-Type: Primary
-          Auth:
-            requisite                       pam_faillock.so preauth
-          Account-Type: Primary
-          Account:
-            required                        pam_faillock.so
-        force: yes
-        mode: 0644
-      when: not faillock_notify_file_stat.stat.exists
-
-    {{{ ansible_apply_pam_auth_update_changes('cac_faillock') | indent(4) }}}
-    {{{ ansible_apply_pam_auth_update_changes('cac_faillock_notify') | indent(4) }}}
-
-  when:
-    - result_pam_auth_update_present.stat.exists
-
-{{% endif -%}}
+{{{ ansible_pam_auth_update_profile('cac_faillock', rule_title=rule_title) }}}
+{{{ ansible_pam_auth_update_profile('cac_faillock_notify', rule_title=rule_title) }}}
+{{{ ansible_apply_pam_auth_update_checked(['cac_faillock', 'cac_faillock_notify'], ['faillock', 'faillock_notify'], rule_title=rule_title) }}}
+{{% endif %}}
 {{%- endmacro -%}}
 
 
@@ -1536,6 +1485,29 @@ The following macro remediates Audit syscall rule in :code:`/etc/audit/audit.rul
 
 #}}
 {{%- macro ansible_pam_faillock_parameter_value(parameter, faillock_var_name='', authfail=True, rule_title=None) -%}}
+{{% if 'ubuntu' in product or 'debian' in product %}}
+{{% if faillock_var_name != '' %}}
+{{{ ansible_instantiate_variables(faillock_var_name) }}}
+{{% endif %}}
+- name: '{{{ rule_title }}} - Configure {{{ parameter }}} in faillock.conf'
+  ansible.builtin.lineinfile:
+    path: {{{ pam_faillock_conf_path }}}
+    regexp: '^\s*{{{ parameter }}}\s*(=|$)'
+    line: '{{{ parameter }}}{{% if faillock_var_name != '' %}} = {{ {{{ faillock_var_name }}} }}{{% endif %}}'
+    create: true
+    mode: '0644'
+
+- name: '{{{ rule_title }}} - Remove inline {{{ parameter }}} from managed profiles'
+  ansible.builtin.replace:
+    path: '{{ item }}'
+    regexp: '(?m)^([^#\n]*pam_faillock\.so[^\n]*?)[ \t]+{{{ parameter }}}(?:=[^\s]+)?(?=[ \t]|$)'
+    replace: '\1'
+  loop:
+    - /usr/share/pam-configs/cac_faillock
+    - /usr/share/pam-configs/cac_faillock_notify
+
+{{{ ansible_apply_pam_auth_update_checked(['cac_faillock', 'cac_faillock_notify'], ['faillock', 'faillock_notify'], rule_title=rule_title) }}}
+{{% else %}}
 
 {{%- if faillock_var_name != '' %}}
 {{{ ansible_instantiate_variables( faillock_var_name ) }}}
@@ -1647,6 +1619,7 @@ The following macro remediates Audit syscall rule in :code:`/etc/audit/audit.rul
   when:
     - not result_faillock_conf_check.stat.exists
 {{%- endif %}}
+{{% endif %}}
 {{%- endmacro -%}}
 
 {{#
@@ -2626,3 +2599,34 @@ lines will be inserted at the beginning of the profile.
   when: {{{ login_defs_correctly }}}.matched == 0 or {{{ login_defs_has_parameter }}}.matched != 1
 
 {{%- endmacro %}}
+
+{{# Debian/Ubuntu profiles must be updated through pam-auth-update, not pamd. #}}
+{{%- macro ansible_pam_auth_update_profile(name, rule_title=None) -%}}
+- name: '{{{ rule_title }}} - Create {{{ name }}} profile if missing'
+  ansible.builtin.copy:
+    dest: /usr/share/pam-configs/{{{ name }}}
+    content: |
+      {{{ pam_auth_update_profile(name) | indent(6) }}}
+    force: false
+    mode: '0644'
+
+- name: '{{{ rule_title }}} - Set {{{ name }}} profile permissions'
+  ansible.builtin.file:
+    path: /usr/share/pam-configs/{{{ name }}}
+    mode: '0644'
+{{%- endmacro -%}}
+
+{{%- macro ansible_apply_pam_auth_update_checked(profiles, conflicts=[], rule_title=None) -%}}
+- name: '{{{ rule_title }}} - Apply and verify PAM profiles without replacing local edits'
+  ansible.builtin.shell: |
+    before=$(sha256sum /etc/pam.d/common-*)
+    {{{ bash_apply_pam_auth_update(profiles, conflicts) | indent(4) }}}
+    after=$(sha256sum /etc/pam.d/common-*)
+    if [ "$before" != "$after" ]; then
+        echo 'SSG PAM configuration changed'
+    fi
+  args:
+    executable: /bin/bash
+  register: pam_auth_update_result
+  changed_when: "'SSG PAM configuration changed' in pam_auth_update_result.stdout"
+{{%- endmacro -%}}

@@ -1,0 +1,112 @@
+{{# Profiles shared by the Bash and Ansible pam-auth-update remediations. #}}
+{{%- macro pam_auth_update_profile(name) -%}}
+{{%- if name == 'cac_pwhistory' -%}}
+Name: pwhistory password history checking
+Default: yes
+Priority: 1024
+Conflicts: pwhistory
+Password-Type: Primary
+Password: requisite pam_pwhistory.so remember=24 enforce_for_root try_first_pass use_authtok
+Password-Initial: requisite pam_pwhistory.so remember=24 enforce_for_root try_first_pass
+{{%- elif name == 'cac_pwquality' -%}}
+Name: Pwquality password strength checking
+Default: yes
+Priority: 1025
+Conflicts: cracklib, pwquality
+Password-Type: Primary
+Password:
+    requisite pam_pwquality.so
+{{%- elif name == 'cac_faillock' -%}}
+Name: Enable pam_faillock to deny access
+Default: yes
+Conflicts: faillock
+Priority: 0
+Auth-Type: Primary
+Auth:
+    [default=die] pam_faillock.so authfail
+{{%- elif name == 'cac_faillock_notify' -%}}
+Name: Notify of failed login attempts and reset count upon success
+Default: yes
+Conflicts: faillock_notify
+Priority: 1025
+Auth-Type: Primary
+Auth:
+    requisite pam_faillock.so preauth
+Account-Type: Primary
+Account:
+    required pam_faillock.so
+{{%- endif -%}}
+{{%- endmacro -%}}
+
+{{# Create only missing profiles, preserving locally supplied module options. #}}
+{{%- macro bash_pam_auth_update_profile(name) -%}}
+if [ ! -f /usr/share/pam-configs/{{{ name }}} ]; then
+    cat > /usr/share/pam-configs/{{{ name }}} <<'EOF_PAM_PROFILE'
+{{{ pam_auth_update_profile(name) }}}
+EOF_PAM_PROFILE
+    if [ "$?" -ne 0 ]; then exit 1; fi
+fi
+chmod 0644 /usr/share/pam-configs/{{{ name }}} || exit 1
+{{%- endmacro -%}}
+
+{{# Read generated PAM files to check that profile activation actually succeeded. #}}
+{{%- macro bash_verify_pam_auth_update(profiles) -%}}
+{{% for profile in profiles %}}
+{{% if profile in ['cac_pwquality', 'cac_pwhistory'] %}}
+{{% set module = 'pam_pwquality.so' if profile == 'cac_pwquality' else 'pam_pwhistory.so' %}}
+if ! awk '
+    /^[[:space:]]*#/ { next }
+    /{{{ module | replace('.', '\\.') }}}/ {
+        count++
+        if ($1 == "password" && $2 == "requisite" && $3 == "{{{ module }}}") valid++
+    }
+    END { exit !(count == 1 && valid == 1) }
+' /etc/pam.d/common-password; then
+    echo 'pam-auth-update did not activate a unique {{{ module }}} password entry' >&2
+    exit 1
+fi
+{{% elif profile == 'cac_faillock_notify' %}}
+if ! awk '
+    /^[[:space:]]*#/ { next }
+    /pam_faillock\.so.*preauth/ {
+        preauth++; preauth_line=NR
+        if ($1 != "auth" || ($2 != "required" && $2 != "requisite")) invalid=1
+    }
+    /pam_unix\.so/ { unix_line=NR }
+    /pam_faillock\.so.*authfail/ {
+        authfail++; authfail_line=NR
+        if ($1 != "auth" || $2 != "[default=die]") invalid=1
+    }
+    END { exit !(preauth == 1 && authfail == 1 && !invalid &&
+                 preauth_line < unix_line && unix_line < authfail_line) }
+' /etc/pam.d/common-auth || ! awk '
+    /^[[:space:]]*#/ { next }
+    /pam_faillock\.so/ {
+        count++
+        if ($1 == "account" && $2 == "required" && $3 == "pam_faillock.so") valid++
+    }
+    END { exit !(count == 1 && valid == 1) }
+' /etc/pam.d/common-account; then
+    echo 'pam-auth-update did not activate the expected faillock authentication and account entries' >&2
+    exit 1
+fi
+{{% endif %}}
+{{% endfor %}}
+{{%- endmacro -%}}
+
+{{# Shared with Ansible: refusing locally modified PAM files can return status zero. #}}
+{{%- macro bash_apply_pam_auth_update(profiles, conflicts=[]) -%}}
+# Do not reuse a previous debconf answer authorizing replacement of local edits.
+printf '%s\n' 'libpam-runtime libpam-runtime/override boolean false' | debconf-set-selections || exit 1
+if ! pam_auth_update_output=$(LC_ALL=C DEBIAN_FRONTEND=noninteractive timeout 60s pam-auth-update{{% if conflicts %}} --disable {{{ conflicts | join(' ') }}}{{% endif %}} --enable {{{ profiles | join(' ') }}} 2>&1); then
+    printf '%s\n' "$pam_auth_update_output" >&2
+    echo 'pam-auth-update failed; PAM configuration was not successfully applied' >&2
+    exit 1
+fi
+printf '%s\n' "$pam_auth_update_output"
+if printf '%s\n' "$pam_auth_update_output" | grep -qiE 'local modifications|not updating|incompatible PAM profiles|cannot be used together'; then
+    echo 'pam-auth-update refused the configuration; resolve existing PAM edits or profile conflicts separately' >&2
+    exit 1
+fi
+{{{ bash_verify_pam_auth_update(profiles) }}}
+{{%- endmacro -%}}
